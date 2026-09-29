@@ -804,13 +804,23 @@ class TestSpritesSandbox:
         # Three attempts for the command; with no socket opened there is no stderr capture to read back.
         assert (transport.connects, transport.execs) == (3, [])
 
-    async def test_timeout_during_a_stalled_handshake_reads_no_capture(self, transport: SpriteTransport) -> None:
+    async def test_handshake_timeout_is_independent_of_command_timeout(
+        self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_sandbox()
+        monkeypatch.setattr(_backend, '_INTERNAL_EXEC_TIMEOUT', 0.05)
         transport.exec_latency = 5
-        with pytest.raises(WorkspaceTimeoutError):
+        with pytest.raises(NetworkError, match='handshake'):
             await backend.run(['true'], timeout=0.3)
-        assert (transport.connects, transport.execs) == (1, [])
+        assert (transport.connects, transport.execs) == (3, [])
+
+    async def test_command_timeout_starts_after_the_handshake(self, transport: SpriteTransport) -> None:
+        backend = SpritesSandboxBackend()
+        await backend.get_sandbox()
+        transport.exec_latency = 0.2
+        result = await backend.run(['sh', '-c', 'sleep 0.05; echo ok'], timeout=0.1)
+        assert (result.exit_code, result.stdout) == (0, 'ok\n')
 
     async def test_exec_handshake_retries_when_command_cannot_have_started(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()

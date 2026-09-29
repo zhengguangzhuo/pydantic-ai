@@ -675,30 +675,31 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         # identifiers from the environment it passes on.
         args = _ending_with(marker, capture, _with_env(command_argv(command, shell), {**self._env, **(env or {})}))
 
-        # Acquiring the Sprite has its own bound; the command's deadline starts after it.
+        # 获取 Sprite 有自己的超时边界；命令的超时预算从连接握手完成后才开始计算。
         if sandbox is None:
             sandbox = await self._get_sandbox()
-        deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
         exec_command = _ExecCommand(sandbox.command(*args, cwd=directory), marker)
         code = -1
         interrupted = False
         try:
-            with deadline:
-                # Stdin EOF gates execution: a handshake that failed before the socket opened cannot
-                # have started the command, so it is retried with backoff; an opened socket never is.
-                for delay in (*_HANDSHAKE_RETRY_DELAYS, None):  # pragma: no branch - each breaks or raises
-                    try:
+            # 握手及其重试不应消耗用户给命令的执行时间，但也必须有独立上限。
+            for delay in (*_HANDSHAKE_RETRY_DELAYS, None):  # pragma: no branch - each breaks or raises
+                try:
+                    with anyio.fail_after(_INTERNAL_EXEC_TIMEOUT):
                         await exec_command.start()
-                        break
-                    except (TimeoutError, InvalidMessage, InvalidHandshake) as error:
-                        if exec_command.ws is not None:
-                            raise WorkspaceUnavailableError(
-                                'Sprites exec connection failed; command may have run'
-                            ) from error
-                        if delay is None:
-                            raise NetworkError(f'Sprites exec handshake failed: {error}') from error
-                        await anyio.sleep(delay)
-                        exec_command = _ExecCommand(sandbox.command(*args, cwd=directory), marker)
+                    break
+                except (TimeoutError, InvalidMessage, InvalidHandshake) as error:
+                    if exec_command.ws is not None:
+                        raise WorkspaceUnavailableError(
+                            'Sprites exec connection failed; command may have run'
+                        ) from error
+                    if delay is None:
+                        raise NetworkError(f'Sprites exec handshake failed: {error}') from error
+                    await anyio.sleep(delay)
+                    exec_command = _ExecCommand(sandbox.command(*args, cwd=directory), marker)
+
+            deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
+            with deadline:
                 try:
                     code = await exec_command.wait()
                 except NetworkError as error:
